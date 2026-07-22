@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MC Server Ping</title>
+    <style>
+        :root {
+            --bg: #e2e7ed;
+            --card-bg: #edf0f4;
+            --text: #2c3e50;
+            --text-secondary: #6b7280;
+            --border: #d0d5dc;
+            --accent: #4a90d9;
+            --accent-hover: #3a7bc8;
+            --success: #27ae60;
+            --error: #c0392b;
+            --chip-bg: #e1e6ed;
+            --chip-hover: #d3d9e2;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+            --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
+            --shadow-md: 0 4px 6px rgba(0,0,0,0.07), 0 2px 4px rgba(0,0,0,0.05);
+            --radius: 10px;
+            --radius-sm: 6px;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            padding: 2em 1em;
+            line-height: 1.6;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 620px;
+            display: flex;
+            flex-direction: column;
+            gap: 1.25em;
+        }
+
+        .header { text-align: center; margin-bottom: 0.25em; }
+        .header h1 {
+            font-size: 1.75em; font-weight: 700; letter-spacing: -0.02em;
+            color: #1a1a2e; margin-bottom: 0.2em;
+        }
+        .header .subtitle { font-size: 0.9em; color: var(--text-secondary); }
+        .header .subtitle code {
+            background: #d7dde5; padding: 2px 7px; border-radius: 4px;
+            font-size: 0.9em; font-weight: 500;
+        }
+
+        .input-card {
+            background: var(--card-bg); border-radius: var(--radius);
+            padding: 1.25em 1.4em; box-shadow: var(--shadow);
+            border: 1px solid var(--border);
+            display: flex; flex-direction: column; gap: 0.7em;
+        }
+        .input-row { display: flex; gap: 10px; align-items: center; }
+        .input-row input {
+            flex: 1; min-width: 0; font-size: 1em; padding: 10px 14px;
+            border: 1.5px solid var(--border); border-radius: var(--radius-sm);
+            background: #ffffff; color: var(--text);
+            transition: border-color 0.2s, box-shadow 0.2s; outline: none;
+        }
+        .input-row input:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(74,144,217,0.12); background: #fff;
+        }
+        .input-row input::placeholder { color: #b0b8c1; }
+        .input-row button {
+            font-size: 0.95em; font-weight: 600; padding: 10px 20px;
+            background: var(--accent); color: #fff; border: none;
+            border-radius: var(--radius-sm); cursor: pointer; white-space: nowrap;
+            transition: background 0.2s, transform 0.2s, box-shadow 0.2s;
+            letter-spacing: 0.01em; position: relative;
+        }
+        .input-row button:hover:not(:disabled) {
+            background: var(--accent-hover); box-shadow: 0 2px 8px rgba(74,144,217,0.3);
+            transform: translateY(-1px);
+        }
+        .input-row button:active:not(:disabled) { transform: translateY(0); box-shadow: none; }
+        .input-row button:disabled { opacity: 0.65; cursor: not-allowed; background: #94b8e0; }
+        .input-row button .spinner {
+            display: none; width: 16px; height: 16px;
+            border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff;
+            border-radius: 50%; animation: spin 0.6s linear infinite;
+            position: absolute; top: 50%; left: 50%;
+            margin-top: -8px; margin-left: -8px;
+        }
+        .input-row button.loading .btn-text { visibility: hidden; }
+        .input-row button.loading .spinner { display: inline-block; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .hint-row {
+            font-size: 0.82em; color: var(--text-secondary);
+            display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+        }
+        .hint-row .badge {
+            background: #e0e6ee; color: #5a6c7d; font-size: 0.78em;
+            padding: 2px 8px; border-radius: 10px;
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+        }
+
+        .history-section {
+            background: var(--card-bg); border-radius: var(--radius);
+            padding: 1em 1.4em; box-shadow: var(--shadow-sm);
+            border: 1px solid var(--border);
+        }
+        .history-section.hidden { display: none; }
+        .history-header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 0.7em; gap: 10px; flex-wrap: wrap;
+        }
+        .history-header .history-title {
+            font-size: 0.9em; font-weight: 600; color: #4a5568;
+            display: flex; align-items: center; gap: 5px; user-select: none;
+        }
+        .history-header .clear-all {
+            font-size: 0.78em; color: #8b9aab; cursor: pointer; border: none;
+            background: none; padding: 3px 8px; border-radius: 4px;
+            transition: color 0.2s, background 0.2s; white-space: nowrap;
+        }
+        .history-header .clear-all:hover { color: #e53e3e; background: #fce4e4; }
+        .history-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+        .history-chip {
+            display: inline-flex; align-items: center; gap: 5px;
+            background: #e1e6ed; border: 1px solid transparent;
+            border-radius: 20px; padding: 6px 8px 6px 14px;
+            font-size: 0.85em; cursor: pointer; transition: all 0.2s;
+            user-select: none; max-width: 100%; color: #3d4f5f;
+        }
+        .history-chip:hover { background: #d3d9e2; border-color: #bcc5d3; color: #1a2a3a; }
+        .history-chip:active { transform: scale(0.97); }
+        .history-chip .chip-text {
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: 0.9em; letter-spacing: 0.01em;
+        }
+        .history-chip .chip-delete {
+            display: flex; align-items: center; justify-content: center;
+            width: 20px; height: 20px; border-radius: 50%; border: none;
+            background: transparent; color: #8b9aab; cursor: pointer;
+            font-size: 1.1em; line-height: 1; transition: all 0.2s; flex-shrink: 0;
+        }
+        .history-chip .chip-delete:hover { background: #fecaca; color: #dc2626; }
+        .history-empty {
+            font-size: 0.84em; color: #a0b0c0; text-align: center;
+            padding: 0.6em 0 0.2em; user-select: none;
+        }
+
+        .result-card {
+            background: var(--card-bg); border-radius: var(--radius);
+            padding: 1.3em 1.5em; box-shadow: var(--shadow-md);
+            border-left: 4px solid var(--accent); line-height: 1.8;
+            word-break: break-word; animation: fadeSlideIn 0.3s ease;
+            min-height: 3em; display: flex; flex-direction: column;
+        }
+        .result-card.error { border-left-color: var(--error); background: #fce8e8; }
+        .result-card.loading { border-left-color: #f0b060; background: #faf3e8; }
+        .result-card.success { border-left-color: var(--success); }
+        @keyframes fadeSlideIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .result-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin: 3px 0; }
+        .result-label { font-weight: 600; color: #4a5568; white-space: nowrap; font-size: 0.93em; }
+        .result-value { color: #1a202c; font-size: 0.93em; }
+        .result-value span,
+        .player-list span {
+            text-shadow: 0 0 2px rgba(0,0,0,0.5);
+        }
+
+        .server-icon {
+            max-width: 64px; max-height: 64px; margin: 8px 0 2px;
+            border-radius: 4px; image-rendering: pixelated;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+        }
+        .player-list { color: #3d5a6e; font-size: 0.9em; line-height: 1.6; }
+
+        @media (max-width: 480px) {
+            body { padding: 1em 0.6em; }
+            .input-row { flex-direction: column; gap: 8px; }
+            .input-row button { width: 100%; padding: 11px; }
+            .header h1 { font-size: 1.4em; }
+            .result-card { padding: 1em 1.1em; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Minecraft 服务器状态查询</h1>
+            <p class="subtitle">
+                支持 <code>地址:端口</code> 格式，默认端口 <strong>25565</strong>
+            </p>
+        </div>
+
+        <div class="input-card">
+            <div class="input-row">
+                <input type="text" id="address" placeholder="例如: mc.hypixel.net" autocomplete="off">
+                <button id="queryBtn" onclick="queryServer()">
+                    <span class="btn-text">🔍 查询</span>
+                    <span class="spinner"></span>
+                </button>
+            </div>
+            <div class="hint-row">
+                💡 试试 <span class="badge">mc.hypixel.net</span> <span class="badge"></span>
+            </div>
+        </div>
+
+        <div class="history-section" id="historySection">
+            <div class="history-header">
+                <span class="history-title">历史记录</span>
+                <button class="clear-all" id="clearAllBtn" onclick="clearAllHistory()">清除全部</button>
+            </div>
+            <div class="history-chips" id="historyChips"></div>
+            <div class="history-empty" id="historyEmpty">暂无历史记录，查询过的服务器会出现在这里</div>
+        </div>
+
+        <div class="result-card" id="result" style="border-left-color: #d1d5db;">
+            <span style="color:#9ca3af;">输入服务器地址开始查询</span>
+        </div>
+    </div>
+
+    <script>
+        (function() {
+            const STORAGE_KEY = 'mc_ping_history_v4';
+            const MAX_HISTORY = 20;
+
+            const addressInput = document.getElementById('address');
+            const queryBtn = document.getElementById('queryBtn');
+            const resultDiv = document.getElementById('result');
+            const historyChips = document.getElementById('historyChips');
+            const historyEmpty = document.getElementById('historyEmpty');
+            const clearAllBtn = document.getElementById('clearAllBtn');
+
+            let isQuerying = false;
+
+            function parseAddress(raw) {
+                const DEFAULT_PORT = 25565;
+                const input = raw.trim();
+                if (!input) return { host: '', port: DEFAULT_PORT, error: '请输入服务器地址' };
+
+                let host = '', port = DEFAULT_PORT;
+
+                if (input.startsWith('[')) {
+                    const bracketClose = input.indexOf(']');
+                    if (bracketClose === -1) return { host: '', port: DEFAULT_PORT, error: 'IPv6 地址格式错误：缺少闭合方括号 "]"' };
+                    host = input.substring(1, bracketClose);
+                    const after = input.substring(bracketClose + 1);
+                    if (after.startsWith(':')) {
+                        const portStr = after.substring(1);
+                        if (portStr.length > 0) {
+                            const p = parseInt(portStr, 10);
+                            if (isNaN(p) || p < 1 || p > 65535) return { host: '', port: DEFAULT_PORT, error: '端口号无效（1~65535）' };
+                            port = p;
+                        }
+                    } else if (after.trim() !== '') {
+                        return { host: '', port: DEFAULT_PORT, error: 'IPv6 地址格式错误："]" 后有多余字符' };
+                    }
+                    return { host, port, error: null };
+                }
+
+                const colonCount = (input.match(/:/g) || []).length;
+                if (colonCount >= 2) {
+                    host = input;
+                    port = DEFAULT_PORT;
+                } else if (colonCount === 1) {
+                    const idx = input.lastIndexOf(':');
+                    const possibleHost = input.substring(0, idx);
+                    const portStr = input.substring(idx + 1);
+                    if (portStr.length === 0) {
+                        host = possibleHost;
+                        port = DEFAULT_PORT;
+                    } else {
+                        const p = parseInt(portStr, 10);
+                        if (isNaN(p) || p < 1 || p > 65535) return { host: '', port: DEFAULT_PORT, error: '端口号无效（1~65535）' };
+                        host = possibleHost;
+                        port = p;
+                    }
+                } else {
+                    host = input;
+                    port = DEFAULT_PORT;
+                }
+
+                if (!host) return { host: '', port: DEFAULT_PORT, error: '主机地址不能为空' };
+                return { host, port, error: null };
+            }
+
+            function formatAddress(host, port) {
+                if (host.includes(':')) return '[' + host + ']:' + port;
+                return host + ':' + port;
+            }
+
+            function parseMinecraftText(text) {
+                if (!text) return '';
+                let escaped = text
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#039;');
+                escaped = escaped.replace(/\n/g, '<br>');
+
+                const colorMap = {
+                    '0': '#000000', '1': '#0000AA', '2': '#00AA00', '3': '#00AAAA',
+                    '4': '#AA0000', '5': '#AA00AA', '6': '#FFAA00', '7': '#AAAAAA',
+                    '8': '#555555', '9': '#5555FF', 'a': '#55FF55', 'b': '#55FFFF',
+                    'c': '#FF5555', 'd': '#FF55FF', 'e': '#FFFF55', 'f': '#FFFFFF'
+                };
+
+                const styleEffects = {
+                    'k': 'obfuscated', 'l': 'bold', 'm': 'strikethrough',
+                    'n': 'underline', 'o': 'italic', 'r': 'reset'
+                };
+
+                let result = '';
+                let i = 0;
+                let currentColor = null;
+                let currentStyles = { bold: false, italic: false, underline: false, strikethrough: false, obfuscated: false };
+                let buffer = '';
+
+                function getStyleAttr() {
+                    const styles = [];
+                    if (currentColor) styles.push('color:' + currentColor);
+                    if (currentStyles.bold) styles.push('font-weight:bold');
+                    if (currentStyles.italic) styles.push('font-style:italic');
+                    if (currentStyles.underline && currentStyles.strikethrough) {
+                        styles.push('text-decoration:underline line-through');
+                    } else if (currentStyles.underline) {
+                        styles.push('text-decoration:underline');
+                    } else if (currentStyles.strikethrough) {
+                        styles.push('text-decoration:line-through');
+                    }
+                    return styles.join(';');
+                }
+
+                function flushBuffer() {
+                    if (buffer.length === 0) return;
+                    const style = getStyleAttr();
+                    if (style) {
+                        result += '<span style="' + style + '">' + buffer + '</span>';
+                    } else {
+                        result += buffer;
+                    }
+                    buffer = '';
+                }
+
+                while (i < escaped.length) {
+                    if (escaped[i] === '§' && i + 1 < escaped.length) {
+                        const code = escaped[i + 1].toLowerCase();
+                        if (colorMap[code] !== undefined) {
+                            flushBuffer();
+                            currentColor = colorMap[code];
+                            currentStyles = { bold: false, italic: false, underline: false, strikethrough: false, obfuscated: false };
+                            i += 2;
+                            continue;
+                        } else if (styleEffects[code]) {
+                            flushBuffer();
+                            if (code === 'r') {
+                                currentColor = null;
+                                currentStyles = { bold: false, italic: false, underline: false, strikethrough: false, obfuscated: false };
+                            } else if (code === 'l') currentStyles.bold = true;
+                            else if (code === 'o') currentStyles.italic = true;
+                            else if (code === 'n') currentStyles.underline = true;
+                            else if (code === 'm') currentStyles.strikethrough = true;
+                            else if (code === 'k') currentStyles.obfuscated = true;
+                            i += 2;
+                            continue;
+                        }
+                    }
+                    buffer += escaped[i];
+                    i++;
+                }
+                flushBuffer();
+                return result;
+            }
+
+            function loadHistory() {
+                try {
+                    const raw = localStorage.getItem(STORAGE_KEY);
+                    if (!raw) return [];
+                    const data = JSON.parse(raw);
+                    return (Array.isArray(data) ? data : []).filter(item =>
+                        item && typeof item.host === 'string' && item.host &&
+                        typeof item.port === 'number' && item.port >= 1 && item.port <= 65535
+                    ).slice(0, MAX_HISTORY);
+                } catch (e) { return []; }
+            }
+
+            function saveHistory(history) {
+                try { localStorage.setItem(STORAGE_KEY, JSON.stringify(history.slice(0, MAX_HISTORY))); } catch (e) {}
+            }
+
+            function addToHistory(host, port) {
+                let history = loadHistory().filter(item => !(item.host === host && item.port === port));
+                history.unshift({ host, port });
+                saveHistory(history);
+                renderHistory();
+            }
+
+            function removeFromHistory(host, port) {
+                const history = loadHistory().filter(item => !(item.host === host && item.port === port));
+                saveHistory(history);
+                renderHistory();
+            }
+
+            function clearAllHistory() {
+                if (!loadHistory().length) return;
+                if (!confirm('确定要清除全部历史记录吗？')) return;
+                saveHistory([]);
+                renderHistory();
+                historyEmpty.textContent = '历史记录已清除';
+                setTimeout(() => { if (loadHistory().length === 0) historyEmpty.textContent = '暂无历史记录，查询过的服务器会出现在这里'; }, 1500);
+            }
+
+            function renderHistory() {
+                const history = loadHistory();
+                historyChips.innerHTML = '';
+                if (history.length === 0) {
+                    historyEmpty.style.display = 'block';
+                    clearAllBtn.style.display = 'none';
+                } else {
+                    historyEmpty.style.display = 'none';
+                    clearAllBtn.style.display = 'inline-block';
+                }
+                history.forEach(item => {
+                    const chip = document.createElement('span');
+                    chip.className = 'history-chip';
+                    const textSpan = document.createElement('span');
+                    textSpan.className = 'chip-text';
+                    textSpan.textContent = formatAddress(item.host, item.port);
+                    textSpan.title = formatAddress(item.host, item.port);
+                    const delBtn = document.createElement('button');
+                    delBtn.className = 'chip-delete';
+                    delBtn.innerHTML = '&#x2715;';
+                    delBtn.title = '删除此记录';
+                    delBtn.addEventListener('click', e => {
+                        e.stopPropagation();
+                        removeFromHistory(item.host, item.port);
+                    });
+                    chip.addEventListener('click', e => {
+                        if (e.target === delBtn) return;
+                        addressInput.value = formatAddress(item.host, item.port);
+                        queryServer();
+                    });
+                    chip.appendChild(textSpan);
+                    chip.appendChild(delBtn);
+                    historyChips.appendChild(chip);
+                });
+            }
+
+            function setQueryingState(loading) {
+                isQuerying = loading;
+                queryBtn.disabled = loading;
+                if (loading) queryBtn.classList.add('loading');
+                else queryBtn.classList.remove('loading');
+            }
+
+            function setResultClass(className) {
+                resultDiv.className = 'result-card ' + className;
+            }
+
+            async function queryServer() {
+                if (isQuerying) return;
+                const rawInput = addressInput.value;
+                const parsed = parseAddress(rawInput);
+                if (parsed.error) {
+                    setResultClass('error');
+                    resultDiv.innerHTML = '<span style="color:#c0392b;font-weight:600;">错误：' + parsed.error + '</span>';
+                    return;
+                }
+                const { host, port } = parsed;
+                const displayAddr = formatAddress(host, port);
+                addressInput.value = displayAddr;
+                addToHistory(host, port);
+
+                setQueryingState(true);
+                setResultClass('loading');
+                resultDiv.innerHTML = '<span style="color:#b07a30;">正在查询 <strong>' + displayAddr + '</strong> ...</span>';
+
+                try {
+                    const resp = await fetch('/query?host=' + encodeURIComponent(host) + '&port=' + encodeURIComponent(port));
+                    const data = await resp.json();
+
+                    if (data.error) {
+                        setResultClass('error');
+                        resultDiv.innerHTML = '<span style="color:#c0392b;font-weight:600;">❌ ' + data.error + '</span>';
+                    } else {
+                        setResultClass('success');
+                        let html = '';
+                        html += '<div class="result-row"><span class="result-label">版本：</span><span class="result-value">' + data.version_name + '（协议号: ' + data.protocol + '）</span></div>';
+                        html += '<div class="result-row"><span class="result-label">在线：</span><span class="result-value">' + data.online_players + ' / ' + data.max_players + '</span></div>';
+                        html += '<div class="result-row"><span class="result-label">MOTD：</span><span class="result-value">' + parseMinecraftText(data.description) + '</span></div>';
+                        html += '<div class="result-row"><span class="result-label">探测延迟：</span><span class="result-value">' + data.ping + ' ms</span></div>';
+                        if (data.player_sample && data.player_sample.length) {
+                            const players = data.player_sample.map(p => parseMinecraftText(p)).join(', ');
+                            html += '<div class="result-row"><span class="result-label">在线玩家：</span><span class="player-list">' + players + '</span></div>';
+                        }
+                        if (data.favicon) {
+                            html += '<img src="' + data.favicon + '" alt="服务器图标" class="server-icon" loading="lazy">';
+                        }
+                        resultDiv.innerHTML = html;
+                    }
+                } catch (err) {
+                    setResultClass('error');
+                    resultDiv.innerHTML = '<span style="color:#c0392b;font-weight:600;">错误 请求失败：' + err.message + '</span>';
+                } finally {
+                    setQueryingState(false);
+                }
+            }
+
+            addressInput.addEventListener('keydown', e => { 
+                if (e.key === 'Enter') { 
+                    e.preventDefault(); 
+                    queryServer(); 
+                } 
+            });
+            
+            window.queryServer = queryServer;
+            window.clearAllHistory = clearAllHistory;
+
+            renderHistory();
+            addressInput.focus();
+        })();
+    </script>
+</body>
+</html>
