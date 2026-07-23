@@ -2,13 +2,12 @@ import socket
 import json
 import struct
 from io import BytesIO
-from typing import Optional, Dict, Any, List, Union, Tuple
+from typing import Optional, Dict, Any, List, Union
 import time
 from contextlib import contextmanager
 import logging
 
-# 导入自制的 DNS 查询模块
-from dns import DNSQuery, MinecraftServerResolver
+from dns import DNSQuery
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ class ProtocolError(MinecraftPingerError):
 class MinecraftPinger:
     """
     Minecraft Java 版服务器列表 Ping 工具
-    支持自动 SRV 记录解析（无需手动处理）
+    自动 SRV 记录解析，支持 IPv4 和 IPv6 连接
     """
 
     # Minecraft 协议常量
@@ -68,7 +67,7 @@ class MinecraftPinger:
             dns_query: 可复用的 DNSQuery 实例，为 None 时自动创建
             enable_srv: 是否启用 SRV 记录解析（默认 True）
         """
-        self.original_host = host  # 保留原始主机名，供日志使用
+        self.original_host = host
         self.host = host
         self.port = port
         self.protocol_version = protocol_version
@@ -81,11 +80,6 @@ class MinecraftPinger:
         self.dns = dns_query if dns_query is not None else DNSQuery()
         self.enable_srv = enable_srv
         self._srv_resolved = False
-
-        # 旧的 DNS 缓存（可选，可继续保留用于 A 记录缓存）
-        self._dns_cache: Optional[str] = None
-        self._dns_cache_time = 0
-        self._dns_cache_ttl = 60
 
     def _resolve_srv(self):
         """
@@ -116,40 +110,20 @@ class MinecraftPinger:
 
     @contextmanager
     def _create_socket(self):
-        """创建并管理 socket 连接"""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(self.timeout)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-
+        """创建并管理 socket 连接，自动支持 IPv4/IPv6"""
+        sock = None
         try:
-            ip = self._resolve_host()
-            sock.connect((ip, self.port))
+            # create_connection 会调用 getaddrinfo 并依次尝试所有地址（包括 IPv6）
+            sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+            sock.settimeout(self.timeout)          # 后续 recv 超时
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             yield sock
+        except OSError as e:
+            # 将所有底层 socket 错误统一为自定义 ConnectionError
+            raise ConnectionError(f"Socket error: {e}") from e
         finally:
-            sock.close()
-
-    def _resolve_host(self) -> str:
-        """解析主机名（A/AAAA），带本地 DNS 缓存"""
-        # 如果已经是 IP 地址，直接返回
-        try:
-            socket.inet_aton(self.host)
-            return self.host
-        except socket.error:
-            pass
-
-        now = time.time()
-        if (self._dns_cache and
-                now - self._dns_cache_time < self._dns_cache_ttl):
-            return self._dns_cache
-
-        self._dns_cache = None  # 过期清除
-        try:
-            ip = socket.gethostbyname(self.host)
-            self._dns_cache = ip
-            self._dns_cache_time = now
-            return ip
-        except socket.gaierror as e:
-            raise ConnectionError(f"Failed to resolve host '{self.host}': {e}")
+            if sock:
+                sock.close()
 
     @staticmethod
     def encode_varint(value: int) -> bytes:
@@ -366,7 +340,7 @@ class MinecraftPinger:
 
     def query(self) -> Dict[str, Any]:
         """
-        执行服务器查询（自动处理 SRV 解析）
+        执行服务器查询（自动 SRV + IPv4/IPv6 双栈）
         """
         # 在重试前完成一次 SRV 解析
         if not self._srv_resolved:
@@ -376,7 +350,7 @@ class MinecraftPinger:
         for attempt in range(self.retries + 1):
             try:
                 return self._query_once()
-            except (ConnectionError, socket.timeout) as e:
+            except ConnectionError as e:
                 last_error = str(e)
                 if attempt < self.retries:
                     time.sleep(self.retry_delay)
