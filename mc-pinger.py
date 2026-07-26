@@ -4,8 +4,10 @@ import struct
 from io import BytesIO
 from typing import Optional, Dict, Any, List, Union
 import time
+import random
 from contextlib import contextmanager
 import logging
+import ipaddress
 
 from dns import DNSQuery
 
@@ -30,7 +32,7 @@ class ProtocolError(MinecraftPingerError):
 class MinecraftPinger:
     """
     Minecraft Java 版服务器列表 Ping 工具
-    自动 SRV 记录解析，支持 IPv4 和 IPv6 连接
+    自动 SRV 记录解析（支持加权随机选择），支持 IPv4 和 IPv6 连接
     """
 
     # Minecraft 协议常量
@@ -80,12 +82,39 @@ class MinecraftPinger:
         self.dns = dns_query if dns_query is not None else DNSQuery()
         self.enable_srv = enable_srv
         self._srv_resolved = False
+        self._srv_targets = []  # 存储解析出的 SRV 目标列表
+
+    @staticmethod
+    def _weighted_random_choice(srv_records):
+
+        if not srv_records:
+            return None
+        
+        # 按优先级分组
+        priority_groups = {}
+        for record in srv_records:
+            priority = record.data.priority
+            priority_groups.setdefault(priority, []).append(record)
+        
+        # 选择最高优先级（数字最小）
+        best_priority = min(priority_groups.keys())
+        candidates = priority_groups[best_priority]
+        
+        # 同优先级内加权随机选择
+        total_weight = sum(r.data.weight for r in candidates)
+        if total_weight == 0:
+            return random.choice(candidates)
+        
+        rand = random.randint(0, total_weight - 1)
+        cumulative = 0
+        for r in candidates:
+            cumulative += r.data.weight
+            if rand < cumulative:
+                return r
+        return candidates[-1]
 
     def _resolve_srv(self):
-        """
-        通过 SRV 记录解析真实的目标主机和端口。
-        仅在首次调用时执行（且 enable_srv=True），结果会直接修改 self.host / self.port。
-        """
+
         if self._srv_resolved:
             return
 
@@ -94,36 +123,57 @@ class MinecraftPinger:
             try:
                 records = self.dns.query(srv_domain, DNSQuery.TYPE_SRV, use_cache=True)
                 if records:
-                    # 按优先级排序，相同优先级则权重高的优先（简化实现）
-                    sorted_records = sorted(records,
-                                            key=lambda r: (r.data.priority, -r.data.weight))
-                    best = sorted_records[0]
-                    new_host = best.data.target
-                    new_port = best.data.port
-                    logger.info(f"SRV 解析成功: {self.original_host} -> {new_host}:{new_port}")
-                    self.host = new_host
-                    self.port = new_port
+                    # 筛选出 SRV 记录
+                    srv_records = [r for r in records if r.type == DNSQuery.TYPE_SRV]
+                    if srv_records:
+                        # RFC 2782 加权随机选择
+                        chosen = self._weighted_random_choice(srv_records)
+                        if chosen:
+                            new_host = chosen.data.target.rstrip('.')  # 移除可能的末尾点
+                            new_port = chosen.data.port
+                            logger.info(
+                                f"SRV 解析成功: {self.original_host} -> {new_host}:{new_port} "
+                                f"(优先级:{chosen.data.priority}, 权重:{chosen.data.weight})"
+                            )
+                            self.host = new_host
+                            self.port = new_port
+                            
+                            # 存储所有可用目标（用于故障转移）
+                            self._srv_targets = [
+                                (r.data.target.rstrip('.'), r.data.port, r.data.priority)
+                                for r in srv_records
+                            ]
             except Exception as e:
-                logger.warning(f"SRV 解析失败，将使用默认地址 {self.original_host}:{self.port}，原因: {e}")
+                logger.warning(
+                    f"SRV 解析失败，将使用默认地址 {self.original_host}:{self.port}，原因: {e}"
+                )
 
         self._srv_resolved = True
 
     @contextmanager
-    def _create_socket(self):
+    def _create_socket(self, connect_timeout: Optional[float] = None):
         """创建并管理 socket 连接，自动支持 IPv4/IPv6"""
         sock = None
+        timeout = connect_timeout if connect_timeout is not None else self.timeout
         try:
             # create_connection 会调用 getaddrinfo 并依次尝试所有地址（包括 IPv6）
-            sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
-            sock.settimeout(self.timeout)          # 后续 recv 超时
+            sock = socket.create_connection((self.host, self.port), timeout=timeout)
+            sock.settimeout(self.timeout)  # 后续 recv 超时
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            # 设置 SO_KEEPALIVE 防止长时间空闲断开
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             yield sock
         except OSError as e:
             # 将所有底层 socket 错误统一为自定义 ConnectionError
-            raise ConnectionError(f"Socket error: {e}") from e
+            raise ConnectionError(f"连接失败 {self.host}:{self.port} - {e}") from e
         finally:
             if sock:
-                sock.close()
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                finally:
+                    sock.close()
 
     @staticmethod
     def encode_varint(value: int) -> bytes:
@@ -163,7 +213,10 @@ class MinecraftPinger:
         """发送完整的 Minecraft 数据包"""
         packet_data = self.encode_varint(packet_id) + data
         full_packet = self.encode_varint(len(packet_data)) + packet_data
-        sock.sendall(full_packet)
+        try:
+            sock.sendall(full_packet)
+        except OSError as e:
+            raise ConnectionError(f"发送数据包失败: {e}")
 
     def _read_packet(self, sock: socket.socket) -> bytes:
         """读取完整的 Minecraft 数据包"""
@@ -174,11 +227,18 @@ class MinecraftPinger:
             raise ProtocolError(f"Packet too large: {length} bytes")
 
         data = bytearray()
-        while len(data) < length:
-            chunk = sock.recv(length - len(data))
-            if not chunk:
-                raise ConnectionError("Connection closed while reading packet")
-            data.extend(chunk)
+        bytes_read = 0
+        while bytes_read < length:
+            try:
+                chunk = sock.recv(min(length - bytes_read, 4096))
+                if not chunk:
+                    raise ConnectionError("Connection closed while reading packet")
+                data.extend(chunk)
+                bytes_read += len(chunk)
+            except socket.timeout:
+                raise ConnectionError(f"读取数据包超时 (已读取 {bytes_read}/{length} bytes)")
+            except OSError as e:
+                raise ConnectionError(f"读取数据包失败: {e}")
         return bytes(data)
 
     def _read_varint_from_socket(self, sock: socket.socket) -> int:
@@ -186,7 +246,10 @@ class MinecraftPinger:
         value = 0
         shift = 0
         while True:
-            byte_data = sock.recv(1)
+            try:
+                byte_data = sock.recv(1)
+            except socket.timeout:
+                raise ConnectionError("读取 VarInt 超时")
             if not byte_data:
                 raise ConnectionError("Connection closed while reading VarInt")
             b = byte_data[0]
@@ -211,10 +274,13 @@ class MinecraftPinger:
         self._write_packet(sock, 0x00, handshake_data)
 
     def _do_ping(self, sock: socket.socket) -> int:
-        """执行 Ping/Pong 并返回延迟（毫秒）"""
-        timestamp = int(time.time() * 1000)
-        ping_data = struct.pack('>Q', timestamp)
-        self._write_packet(sock, 0x01, ping_data)
+        """
+        执行 Ping/Pong 并返回延迟（毫秒）
+        使用高性能计时器避免系统时间调整影响
+        """
+        ping_start = time.perf_counter()
+        ping_payload = struct.pack('>Q', int(ping_start * 1000))
+        self._write_packet(sock, 0x01, ping_payload)
 
         response = self._read_packet(sock)
         stream = BytesIO(response)
@@ -222,14 +288,14 @@ class MinecraftPinger:
         if packet_id != 0x01:
             raise ProtocolError(f"Expected Pong packet (ID 0x01), got {packet_id}")
 
-        pong_timestamp_bytes = stream.read(8)
-        if len(pong_timestamp_bytes) != 8:
-            raise ProtocolError("Incomplete Pong timestamp")
-        pong_timestamp = struct.unpack('>Q', pong_timestamp_bytes)[0]
-
-        current_time = int(time.time() * 1000)
-        ping_ms = current_time - pong_timestamp
-        return max(ping_ms, 0)  # 防止负数
+        pong_payload = stream.read(8)
+        if len(pong_payload) != 8:
+            raise ProtocolError("Incomplete Pong payload")
+        
+        # 使用 perf_counter 计算真实往返时间，不受系统时间调整影响
+        ping_end = time.perf_counter()
+        ping_ms = int((ping_end - ping_start) * 1000)
+        return max(ping_ms, 0)
 
     def _parse_status_response(self, data: bytes) -> Dict[str, Any]:
         """解析 Status Response 包，返回 JSON 数据"""
@@ -245,9 +311,10 @@ class MinecraftPinger:
         json_bytes = stream.read(json_length)
         if len(json_bytes) != json_length:
             raise ProtocolError("Incomplete JSON data")
+        
         try:
             return json.loads(json_bytes.decode('utf-8'))
-        except json.JSONDecodeError as e:
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
             raise ProtocolError(f"Invalid JSON response: {e}")
 
     def _build_result(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -261,7 +328,8 @@ class MinecraftPinger:
             "player_sample": [],
             "description": "",
             "description_raw": None,
-            "favicon": None
+            "favicon": None,
+            "mod_info": None  # Forge/Fabric 模组信息
         }
 
         if "version" in data:
@@ -275,7 +343,8 @@ class MinecraftPinger:
             sample = players.get("sample", [])
             if sample:
                 result["player_sample"] = [
-                    p.get("name", "Unknown") for p in sample if isinstance(p, dict)
+                    {"name": p.get("name", "Unknown"), "id": p.get("id", "")}
+                    for p in sample if isinstance(p, dict)
                 ]
 
         if "description" in data:
@@ -286,10 +355,24 @@ class MinecraftPinger:
         if "favicon" in data:
             result["favicon"] = data["favicon"]
 
+        # 模组信息（Forge/Fabric 等）
+        if "modinfo" in data:
+            result["mod_info"] = data["modinfo"]
+        if "forgeData" in data:
+            result["mod_info"] = data["forgeData"]
+
         return result
 
-    def _parse_chat_component(self, component: Union[str, Dict[str, Any]]) -> str:
-        """递归解析 Minecraft 聊天组件为纯文本"""
+    def _parse_chat_component(self, component: Union[str, Dict[str, Any]], 
+                              default_color: str = "") -> str:
+        """
+        递归解析 Minecraft 聊天组件为纯文本
+        
+        支持更多格式：
+        - text, translate, with
+        - extra, color, bold, italic 等样式（忽略，仅提取文本）
+        - keybind, score, selector 等特殊组件
+        """
         if isinstance(component, str):
             return component
         if not isinstance(component, dict):
@@ -297,41 +380,81 @@ class MinecraftPinger:
 
         parts = []
 
+        # 提取直接文本内容
         if "text" in component:
             parts.append(component["text"])
 
+        # 翻译文本
         if "translate" in component:
             key = component["translate"]
             with_args = component.get("with", [])
             if with_args:
                 try:
                     args = [self._parse_chat_component(arg) for arg in with_args]
+                    # 简单的占位符替换
                     text = key
                     for arg in args:
-                        text = text.replace("%s", arg, 1)
+                        if "%s" in text:
+                            text = text.replace("%s", arg, 1)
+                        elif "%%s" in text:
+                            text = text.replace("%%s", "%s", 1)
+                        else:
+                            text += arg
                     parts.append(text)
                 except Exception:
                     parts.append(key)
             else:
                 parts.append(key)
 
+        # 快捷键绑定
+        if "keybind" in component:
+            parts.append(f"[{component['keybind']}]")
+
+        # 计分板值
+        if "score" in component:
+            score = component["score"]
+            name = score.get("name", "?")
+            objective = score.get("objective", "?")
+            parts.append(f"[{name}:{objective}]")
+
+        # 实体选择器
+        if "selector" in component:
+            parts.append(f"[{component['selector']}]")
+
+        # 递归处理子元素
         if "extra" in component:
             for child in component["extra"]:
                 parts.append(self._parse_chat_component(child))
 
-        return "".join(parts)
+        # 处理换行符（某些服务器用 \n 分隔多行 MOTD）
+        text = "".join(parts)
+        
+        # 清理格式代码（§ 符号 + 颜色/格式代码）
+        import re
+        text = re.sub(r'§[0-9a-fk-or]', '', text, flags=re.IGNORECASE)
+        
+        return text
 
     def _query_once(self) -> Dict[str, Any]:
         """执行单次查询（不包含重试逻辑）"""
         with self._create_socket() as sock:
+            # 握手
             self._send_handshake(sock)
+            
+            # 请求状态
             self._write_packet(sock, 0x00, b'')  # Status Request
+            
+            # 读取响应
             response_data = self._read_packet(sock)
             response = self._parse_status_response(response_data)
 
+            # 测量延迟
             ping_ms = None
             if self.enable_ping:
-                ping_ms = self._do_ping(sock)
+                try:
+                    ping_ms = self._do_ping(sock)
+                except Exception as e:
+                    logger.debug(f"Ping 测量失败: {e}")
 
             result = self._build_result(response)
             if ping_ms is not None:
@@ -341,6 +464,9 @@ class MinecraftPinger:
     def query(self) -> Dict[str, Any]:
         """
         执行服务器查询（自动 SRV + IPv4/IPv6 双栈）
+        
+        Returns:
+            包含服务器信息的字典，成功时 "success" 为 True
         """
         # 在重试前完成一次 SRV 解析
         if not self._srv_resolved:
@@ -349,20 +475,47 @@ class MinecraftPinger:
         last_error = None
         for attempt in range(self.retries + 1):
             try:
-                return self._query_once()
+                result = self._query_once()
+                # 添加解析信息
+                result["resolved_host"] = self.host
+                result["resolved_port"] = self.port
+                result["original_host"] = self.original_host
+                return result
             except ConnectionError as e:
                 last_error = str(e)
+                logger.debug(f"连接尝试 {attempt + 1}/{self.retries + 1} 失败: {e}")
                 if attempt < self.retries:
                     time.sleep(self.retry_delay)
                     continue
                 else:
-                    return {"success": False, "error": f"Connection failed: {last_error}"}
+                    return {
+                        "success": False,
+                        "error": f"连接失败: {last_error}",
+                        "host": self.host,
+                        "port": self.port
+                    }
             except ProtocolError as e:
-                return {"success": False, "error": f"Protocol error: {e}"}
+                return {
+                    "success": False,
+                    "error": f"协议错误: {e}",
+                    "host": self.host,
+                    "port": self.port
+                }
             except Exception as e:
-                return {"success": False, "error": f"Unexpected error: {e}"}
+                logger.error(f"未预期的错误: {e}", exc_info=True)
+                return {
+                    "success": False,
+                    "error": f"未预期的错误: {e}",
+                    "host": self.host,
+                    "port": self.port
+                }
 
-        return {"success": False, "error": f"All retries failed: {last_error}"}
+        return {
+            "success": False,
+            "error": f"所有重试均失败: {last_error}",
+            "host": self.host,
+            "port": self.port
+        }
 
     def query_simple(self) -> Optional[Dict[str, Any]]:
         """简化查询，失败返回 None"""
@@ -379,29 +532,13 @@ class MinecraftPinger:
         online = result.get("online_players", 0)
         max_players = result.get("max_players", 0)
         ping = result.get("ping", -1)
+        motd = result.get("description", "")
 
-        parts = [f"版本: {version}", f"玩家: {online}/{max_players}"]
-        if ping >= 0:
-            parts.append(f"延迟: {ping}ms")
+        parts = [f" {version}", f" {online}/{max_players}"]
+        if ping is not None and ping >= 0:
+            parts.append(f" {ping}ms")
+        if motd:
+            # 截取第一行 MOTD
+            motd_first_line = motd.split('\n')[0][:50]
+            parts.append(f" {motd_first_line}")
         return " | ".join(parts)
-
-
-# ------------------- 简单使用示例 -------------------
-if __name__ == "__main__":
-    # 使用自定义 DNS 服务器（可选）
-    custom_dns = DNSQuery(dns_servers=['1.1.1.1', '8.8.8.8'])
-    pinger = MinecraftPinger("mc.hypixel.net", dns_query=custom_dns)
-
-    print("正在查询服务器...")
-    result = pinger.query()
-    if result["success"]:
-        print(" 服务器在线")
-        print(f"  版本: {result['version_name']} (协议 {result['protocol']})")
-        print(f"  玩家: {result['online_players']}/{result['max_players']}")
-        print(f"  描述: {result['description']}")
-        if result.get("ping"):
-            print(f"  延迟: {result['ping']} ms")
-        if result.get("player_sample"):
-            print(f"  在线玩家: {', '.join(result['player_sample'][:10])}")
-    else:
-        print(f" 查询失败: {result['error']}")
