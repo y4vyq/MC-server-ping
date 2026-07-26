@@ -212,7 +212,7 @@
                 </button>
             </div>
             <div class="hint-row">
-                💡 试试 <span class="badge">mc.hypixel.net</span> <span class="badge"></span>
+                💡 试试 <span class="badge">mc.hypixel.net</span>
             </div>
         </div>
 
@@ -301,7 +301,21 @@
             }
 
             function parseMinecraftText(text) {
+                // 类型安全处理
                 if (!text) return '';
+                if (typeof text !== 'string') {
+                    if (typeof text === 'object' && text !== null) {
+                        // 优先使用 name 字段（玩家对象）
+                        if (text.name) text = text.name;
+                        // 或者使用 text 字段（MOTD对象）
+                        else if (text.text) text = text.text;
+                        // 否则转为 JSON 字符串
+                        else text = JSON.stringify(text);
+                    } else {
+                        text = String(text);
+                    }
+                }
+
                 let escaped = text
                     .replace(/&/g, '&amp;')
                     .replace(/</g, '&lt;')
@@ -499,12 +513,14 @@
                         let html = '';
                         html += '<div class="result-row"><span class="result-label">版本：</span><span class="result-value">' + data.version_name + '（协议号: ' + data.protocol + '）</span></div>';
                         html += '<div class="result-row"><span class="result-label">在线：</span><span class="result-value">' + data.online_players + ' / ' + data.max_players + '</span></div>';
-                        html += '<div class="result-row"><span class="result-label">MOTD：</span><span class="result-value">' + parseMinecraftText(data.description) + '</span></div>';
+                        html += '<div class="result-row"><span class="result-label">描述：</span><span class="result-value">' + parseMinecraftText(data.description) + '</span></div>';
                         html += '<div class="result-row"><span class="result-label">探测延迟：</span><span class="result-value">' + data.ping + ' ms</span></div>';
+
                         if (data.player_sample && data.player_sample.length) {
                             const players = data.player_sample.map(p => parseMinecraftText(p)).join(', ');
                             html += '<div class="result-row"><span class="result-label">在线玩家：</span><span class="player-list">' + players + '</span></div>';
                         }
+
                         if (data.favicon) {
                             html += '<img src="' + data.favicon + '" alt="服务器图标" class="server-icon" loading="lazy">';
                         }
@@ -518,13 +534,13 @@
                 }
             }
 
-            addressInput.addEventListener('keydown', e => { 
-                if (e.key === 'Enter') { 
-                    e.preventDefault(); 
-                    queryServer(); 
-                } 
+            addressInput.addEventListener('keydown', e => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    queryServer();
+                }
             });
-            
+
             window.queryServer = queryServer;
             window.clearAllHistory = clearAllHistory;
 
