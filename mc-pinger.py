@@ -53,7 +53,9 @@ class MinecraftPinger:
         retry_delay: float = 1.0,
         enable_ping: bool = True,
         dns_query: Optional[DNSQuery] = None,
-        enable_srv: bool = True
+        enable_srv: bool = True,
+        force_srv: bool = False,
+        SQL_db:bool = True     #后续添加缓存
     ):
         """
         初始化 Minecraft Pinger
@@ -83,6 +85,13 @@ class MinecraftPinger:
         self.enable_srv = enable_srv
         self._srv_resolved = False
         self._srv_targets = []  # 存储解析出的 SRV 目标列表
+        self.force_srv = force_srv
+
+        try:
+            ipaddress.ip_address(self.original_host)
+            self._is_ip = True
+        except ValueError:
+            self._is_ip = False
 
     @staticmethod
     def _weighted_random_choice(srv_records):
@@ -114,39 +123,38 @@ class MinecraftPinger:
         return candidates[-1]
 
     def _resolve_srv(self):
-
         if self._srv_resolved:
             return
 
-        if self.enable_srv:
+        if self._is_ip:
+            logger.info(f"输入为 IP 地址，跳过 SRV 解析: {self.host}:{self.port}")
+            self._srv_resolved = True
+            return
+
+        if self.enable_srv or self.force_srv:
             srv_domain = f'_minecraft._tcp.{self.original_host}'
             try:
                 records = self.dns.query(srv_domain, DNSQuery.TYPE_SRV, use_cache=True)
                 if records:
-                    # 筛选出 SRV 记录
                     srv_records = [r for r in records if r.type == DNSQuery.TYPE_SRV]
                     if srv_records:
-                        # RFC 2782 加权随机选择
                         chosen = self._weighted_random_choice(srv_records)
                         if chosen:
-                            new_host = chosen.data.target.rstrip('.')  # 移除可能的末尾点
+                            new_host = chosen.data.target.rstrip('.')
                             new_port = chosen.data.port
-                            logger.info(
-                                f"SRV 解析成功: {self.original_host} -> {new_host}:{new_port} "
-                                f"(优先级:{chosen.data.priority}, 权重:{chosen.data.weight})"
-                            )
+                            logger.info(f"SRV 解析成功: {self.original_host} -> {new_host}:{new_port}")
                             self.host = new_host
                             self.port = new_port
-                            
-                            # 存储所有可用目标（用于故障转移）
-                            self._srv_targets = [
-                                (r.data.target.rstrip('.'), r.data.port, r.data.priority)
-                                for r in srv_records
-                            ]
+                            self._srv_targets = []
+                    elif self.force_srv:
+                        logger.warning(f"强制 SRV 解析，但未找到有效的 SRV 记录")
+                elif self.force_srv:
+                    logger.warning(f"强制 SRV 解析，但 {srv_domain} 查询无结果")
             except Exception as e:
-                logger.warning(
-                    f"SRV 解析失败，将使用默认地址 {self.original_host}:{self.port}，原因: {e}"
-                )
+                if self.force_srv:
+                    logger.error(f"强制 SRV 解析失败: {e}")
+                else:
+                    logger.warning(f"SRV 解析异常（非强制模式）: {e}")
 
         self._srv_resolved = True
 
@@ -534,7 +542,7 @@ class MinecraftPinger:
         ping = result.get("ping", -1)
         motd = result.get("description", "")
 
-        parts = [f" {version}", f" {online}/{max_players}"]
+        parts = [f" {version}", f"👥 {online}/{max_players}"]
         if ping is not None and ping >= 0:
             parts.append(f" {ping}ms")
         if motd:
@@ -542,3 +550,30 @@ class MinecraftPinger:
             motd_first_line = motd.split('\n')[0][:50]
             parts.append(f" {motd_first_line}")
         return " | ".join(parts)
+
+
+# ------------------- 简单使用示例 -------------------
+if __name__ == "__main__":
+    # 使用自定义 DNS 服务器（可选）
+    custom_dns = DNSQuery(dns_servers=['1.1.1.1', '8.8.8.8'])
+    pinger = MinecraftPinger("mc.hypixel.net", dns_query=custom_dns)
+
+    print("正在查询服务器...")
+    result = pinger.query()
+    if result["success"]:
+        print(" 服务器在线")
+        print(f"  实际连接: {result['resolved_host']}:{result['resolved_port']}")
+        print(f"  版本: {result['version_name']} (协议 {result['protocol']})")
+        print(f"  玩家: {result['online_players']}/{result['max_players']}")
+        print(f"  描述: {result['description']}")
+        if result.get("ping"):
+            print(f"  延迟: {result['ping']} ms")
+        if result.get("player_sample"):
+            players = [p["name"] for p in result['player_sample'][:10]]
+            print(f"  在线玩家: {', '.join(players)}")
+        if result.get("mod_info"):
+            print(f"  模组信息: {result['mod_info']}")
+        
+        print(f"\n  状态: {pinger.get_status_string()}")
+    else:
+        print(f"❌ 查询失败: {result['error']}")
