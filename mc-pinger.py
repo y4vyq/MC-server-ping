@@ -542,7 +542,7 @@ class MinecraftPinger:
         ping = result.get("ping", -1)
         motd = result.get("description", "")
 
-        parts = [f" {version}", f"👥 {online}/{max_players}"]
+        parts = [f" {version}", f" {online}/{max_players}"]
         if ping is not None and ping >= 0:
             parts.append(f" {ping}ms")
         if motd:
