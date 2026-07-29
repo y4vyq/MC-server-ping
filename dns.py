@@ -9,6 +9,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import ipaddress
+import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -87,7 +88,8 @@ class DNSCache:
 
 class DNSQuery:
     """DNS查询客户端（线程安全，优化的缓存和异常处理，支持CNAME追踪）"""
-
+    
+    # DNS记录类型常量
     TYPE_A = 1
     TYPE_NS = 2
     TYPE_CNAME = 5
@@ -97,27 +99,76 @@ class DNSQuery:
     TYPE_TXT = 16
     TYPE_AAAA = 28
     TYPE_SRV = 33
-
+    
+    # 自动生成类型名称映射
     TYPE_NAMES = {
-        1: 'A', 2: 'NS', 5: 'CNAME', 6: 'SOA',
-        12: 'PTR', 15: 'MX', 16: 'TXT', 28: 'AAAA', 33: 'SRV'
+        TYPE_A: 'A', TYPE_NS: 'NS', TYPE_CNAME: 'CNAME',
+        TYPE_SOA: 'SOA', TYPE_PTR: 'PTR', TYPE_MX: 'MX',
+        TYPE_TXT: 'TXT', TYPE_AAAA: 'AAAA', TYPE_SRV: 'SRV'
     }
-
+    
     CLASS_IN = 1
-
-    def __init__(self, dns_servers: List[str] = None, timeout: float = 5.0,
-                 max_retries: int = 3, cache_size: int = 128, cache_ttl: int = 300,
+    DEFAULT_DNS = ['8.8.8.8', '1.1.1.1', '114.114.114.114']
+    
+    def __init__(self, dns_servers: Optional[List[str]] = None, 
+                 timeout: float = 5.0,
+                 max_retries: int = 3, 
+                 cache_size: int = 128, 
+                 cache_ttl: int = 300,
                  max_cname_depth: int = 10):
         """
+        DNS查询客户端初始化
+        
+        :param dns_servers: DNS服务器列表，不传则从文件或默认值读取
+        :param timeout: 查询超时时间（秒）
+        :param max_retries: 最大重试次数
+        :param cache_size: 缓存最大条目数
+        :param cache_ttl: 缓存过期时间（秒）
         :param max_cname_depth: CNAME追踪的最大深度，防止循环引用
         """
-        self.dns_servers = dns_servers or ['8.8.8.8', '1.1.1.1', '9.9.9.9']
+        # 确定DNS服务器列表
+        if dns_servers is not None:
+            self.dns_servers = dns_servers
+        else:
+            self.dns_servers = self._load_dns_servers_from_file()
+        
+        # 备选方案
+        if not self.dns_servers:
+            self.dns_servers = self.DEFAULT_DNS
+        
         self.timeout = timeout
         self.max_retries = max_retries
         self.max_cname_depth = max_cname_depth
         self._stats = defaultdict(int)
         self._lock = threading.Lock()
         self._cache = DNSCache(maxsize=cache_size, default_ttl=cache_ttl)
+    
+    def _load_dns_servers_from_file(self) -> List[str]:
+        """从配置文件加载DNS服务器列表"""
+        # 如果已经加载过，直接返回缓存的结果
+        if hasattr(self, '_cached_servers'):
+            return self._cached_servers
+        
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        config_path = os.path.join(script_dir, 'dns_servers.txt')
+        
+        try:
+            with open(config_path, 'r') as f:
+                servers = [
+                    line.strip() 
+                    for line in f 
+                    if line.strip() and not line.startswith('#')
+                ]
+            
+            if servers:
+                return servers
+            else:
+                return []
+                
+        except FileNotFoundError:
+            return []
+        except Exception as e:
+            return []
 
     @staticmethod
     def _generate_transaction_id() -> int:
@@ -481,15 +532,25 @@ class DNSQuery:
 
 class MinecraftServerResolver:
     """Minecraft服务器解析器（支持RFC 2782加权随机选择和CNAME追踪）"""
-    def __init__(self, dns_query: DNSQuery = None):
+    def __init__(self, dns_query: DNSQuery = None, force_srv: bool = False):
+        """
+        :param dns_query: DNS 查询客户端实例
+        :param force_srv: 是否强制仅使用 SRV 解析（不回退到 A 记录）
+        """
         self.dns = dns_query or DNSQuery()
+        self.force_srv = force_srv
+
+    @staticmethod
+    def _is_ip_address(domain: str) -> bool:
+        """判断输入是否为纯 IP 地址（IPv4 或 IPv6）"""
+        try:
+            ipaddress.ip_address(domain)
+            return True
+        except ValueError:
+            return False
 
     @staticmethod
     def _weighted_random_choice(candidates: List[DNSRecord]) -> DNSRecord:
-        """
-        在同优先级候选服务器中，根据权重进行加权随机选择。
-        若所有权重为0，则等概率随机选择。
-        """
         total_weight = sum(r.data.weight for r in candidates)
         if total_weight == 0:
             return random.choice(candidates)
@@ -501,35 +562,37 @@ class MinecraftServerResolver:
                 return r
         return candidates[-1]
 
-    def resolve_server(self, domain: str) -> Tuple[Optional[str], Optional[int]]:
+    def resolve_server(self, domain: str, force_srv: Optional[bool] = None) -> Tuple[Optional[str], Optional[int]]:
         """
         解析Minecraft服务器地址，返回 (host, port) 或 (None, None)
-        支持SRV记录的CNAME追踪和加权随机选择
+        
+        :param domain: 域名或 IP 地址
+        :param force_srv: 是否强制仅使用 SRV 解析。若为 None，则使用实例默认值 self.force_srv
         """
+        if force_srv is None:
+            force_srv = self.force_srv
+
+        # 如果已经是 IP 地址，直接返回，端口默认 25565
+        if self._is_ip_address(domain):
+            logger.info(f"输入为 IP 地址，直接使用: {domain}:25565")
+            return domain, 25565
+
         try:
             srv_domain = f'_minecraft._tcp.{domain}'
             answers = self.dns.query(srv_domain, DNSQuery.TYPE_SRV)
 
             if answers:
-                # 筛选出SRV记录（过滤掉CNAME等中间记录）
                 srv_records = [r for r in answers if r.type == DNSQuery.TYPE_SRV]
-                
                 if not srv_records:
                     logger.warning(f"查询 {srv_domain} 未返回有效的SRV记录")
                 else:
-                    # 按优先级分组
                     priority_groups = {}
                     for record in srv_records:
                         priority_groups.setdefault(record.data.priority, []).append(record)
-                    
-                    # 取最高优先级（数字最小）
                     best_priority = min(priority_groups.keys())
                     candidates = priority_groups[best_priority]
-                    
-                    # 加权随机选择一台服务器
                     chosen = self._weighted_random_choice(candidates)
-                    
-                    # 获取CNAME链信息（如果有）
+
                     cname_records = [r for r in answers if r.type == DNSQuery.TYPE_CNAME]
                     if cname_records:
                         logger.info(f"✅ 通过CNAME解析找到 SRV 记录: {chosen.data.target}:{chosen.data.port} "
@@ -537,14 +600,18 @@ class MinecraftServerResolver:
                     else:
                         logger.info(f"✅ 找到 SRV 记录: {chosen.data.target}:{chosen.data.port} "
                                     f"(优先级:{chosen.data.priority}, 权重:{chosen.data.weight})")
-                    
                     return chosen.data.target, chosen.data.port
 
-            # 无SRV记录时回退到A记录
+            # 无 SRV 记录时的处理
+            if force_srv:
+                logger.info(f"强制 SRV 解析，未找到 SRV 记录，放弃解析")
+                return None, None
+
+            # 回退到 A 记录
             logger.info(f"ℹ️ 未找到SRV记录，尝试直接解析 {domain}")
             a_records = self.dns.query(domain, DNSQuery.TYPE_A)
             if a_records:
-                # 取第一个A记录
+                # 取第一个 A 记录
                 ip = a_records[0].data if a_records[0].type == DNSQuery.TYPE_A else a_records[-1].data
                 return domain, 25565
             return None, None
@@ -552,39 +619,38 @@ class MinecraftServerResolver:
             logger.error(f"解析 {domain} 失败: {e}")
             return None, None
 
-    def resolve_server_detailed(self, domain: str) -> Dict[str, Any]:
-        """
-        详细解析Minecraft服务器，返回完整的解析信息
-        
-        :return: {
-            'host': '目标主机',
-            'port': 端口号,
-            'final_domain': '最终解析的域名',
-            'cname_chain': ['CNAME1', 'CNAME2', ...],
-            'records': [相关DNS记录]
-        }
-        """
+    def resolve_server_detailed(self, domain: str, force_srv: Optional[bool] = None) -> Dict[str, Any]:
+        """详细解析，支持 force_srv 控制和 IP 直连"""
+        if force_srv is None:
+            force_srv = self.force_srv
+
+        if self._is_ip_address(domain):
+            return {
+                'host': domain,
+                'port': 25565,
+                'final_domain': domain,
+                'cname_chain': [],
+                'records': [],
+                'status': 'resolved_ip'
+            }
+
         try:
             srv_domain = f'_minecraft._tcp.{domain}'
             cname_info = self.dns.query_with_cname_info(srv_domain, DNSQuery.TYPE_SRV)
-            
+
             if cname_info['records']:
                 srv_records = cname_info['records']
-                host, port = None, None
-                
                 if len(srv_records) == 1:
                     chosen = srv_records[0]
                 else:
-                    # 加权随机选择
                     priority_groups = {}
                     for record in srv_records:
                         priority_groups.setdefault(record.data.priority, []).append(record)
                     best_priority = min(priority_groups.keys())
                     candidates = priority_groups[best_priority]
                     chosen = self._weighted_random_choice(candidates)
-                
+
                 host, port = chosen.data.target, chosen.data.port
-                
                 return {
                     'host': host,
                     'port': port,
@@ -593,8 +659,11 @@ class MinecraftServerResolver:
                     'records': srv_records,
                     'status': 'resolved'
                 }
-            
-            # 回退到A记录
+
+            if force_srv:
+                return {'status': 'failed', 'error': '强制 SRV 解析失败'}
+
+            # 回退到 A 记录
             a_cname_info = self.dns.query_with_cname_info(domain, DNSQuery.TYPE_A)
             if a_cname_info['records']:
                 ip = a_cname_info['records'][0].data
@@ -606,22 +675,10 @@ class MinecraftServerResolver:
                     'records': a_cname_info['records'],
                     'status': 'resolved_via_a'
                 }
-            
             return {'status': 'failed', 'error': '无法解析服务器地址'}
         except Exception as e:
             logger.error(f"详细解析 {domain} 失败: {e}")
             return {'status': 'failed', 'error': str(e)}
-
-    def resolve_multiple(self, domains: List[str]) -> Dict[str, Dict]:
-        """批量解析多个Minecraft服务器"""
-        results = {}
-        for domain in domains:
-            host, port = self.resolve_server(domain)
-            if host:
-                results[domain] = {'host': host, 'port': port, 'status': 'online'}
-            else:
-                results[domain] = {'status': 'offline'}
-        return results
 
 
 class DNSBenchmark:
@@ -657,3 +714,48 @@ class DNSBenchmark:
                 stats['avg_time_ms'] = float('inf')
             results[server] = stats
         return results
+
+
+if __name__ == "__main__":
+    # 示例1：基本使用
+    print("=== 基本解析示例 ===")
+    dns_client = DNSQuery()
+    resolver = MinecraftServerResolver(dns_client)
+    
+    # 测试CNAME追踪
+    print("\n测试CNAME记录解析:")
+    # 查询常见的CNAME记录
+    cname_info = dns_client.query_with_cname_info("www.github.com", DNSQuery.TYPE_A)
+    print(f"最终域名: {cname_info['final_domain']}")
+    print(f"CNAME链: {' -> '.join(['www.github.com'] + cname_info['cname_chain'])}")
+    for record in cname_info['records']:
+        print(f"  {record}")
+
+    # 示例2：Minecraft服务器解析
+    print("\n=== Minecraft服务器解析 ===")
+    test_domains = ["hypixel.net", "mc.hypixel.net"]
+    for domain in test_domains:
+        print(f"\n解析 {domain}:")
+        host, port = resolver.resolve_server(domain)
+        if host:
+            print(f"  服务器: {host}:{port}")
+        else:
+            print(f"  解析失败")
+        
+        # 详细解析
+        detailed = resolver.resolve_server_detailed(domain)
+        print(f"  详细: {detailed}")
+
+    # 示例3：批量查询
+    print("\n=== 批量查询 ===")
+    domains = ["google.com", "github.com", "youtube.com"]
+    results = dns_client.query_batch(domains, DNSQuery.TYPE_A)
+    for domain, records in results.items():
+        ips = [r.data for r in records if r.type == DNSQuery.TYPE_A]
+        print(f"  {domain}: {ips}")
+
+    # 示例4：性能统计
+    print("\n=== 查询统计 ===")
+    stats = dns_client.get_stats()
+    for key, value in stats.items():
+        print(f"  {key}: {value}")
