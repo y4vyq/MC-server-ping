@@ -412,7 +412,7 @@ def handle_new_protocol(data: bytes, client_socket: socket.socket, config: Confi
                         print(" Ping包 (0x01)")
                         if len(packet_data) >= id_bytes + 8:
                             ping_payload = struct.unpack('>Q', packet_data[id_bytes:id_bytes + 8])[0]
-                            print(f"⏱️ Ping payload: {ping_payload}")
+                            print(f" Ping payload: {ping_payload}")
                             
                             pong_packet = write_varint(0x01) + struct.pack('>Q', ping_payload)
                             pong_len = write_varint(len(pong_packet))
