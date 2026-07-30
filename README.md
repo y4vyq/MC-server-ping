@@ -10,6 +10,9 @@
 ├── dns.py            # DNS 查询模块（支持 SRV 记录解析）
 ├── web.py            # Web 服务入口
 ├── dns_servers.txt   # DNS服务器列表
+└──test/
+│  ├──test.py         # 测试服务器（模拟正常服务端）
+│  └──test.json       # 呈现显示效果的配置文件
 └── templates/
     └── index.html    # 前端查询页面
 ```
@@ -152,6 +155,48 @@ dns_servers = ['8.8.8.8', '1.1.1.1', '9.9.9.9']
 2400:3200::1
 2400:3200:baba::1
 ```
+### Minecraft服务器模拟器配置
+
+一个简单示例
+
+```json
+{
+  "version": {
+    "protocol": 775,
+    "name": "A Minecraft Server"
+  },
+  "players": {
+    "online": 1,
+    "max": 1,
+    "sample": [
+      {
+        "name": "Stever",
+        "id": "12345678-1234-1234-1234-123456789ABC"
+      }
+    ]
+
+  },
+  "description": {
+    "text":"A Minecraft Server"
+  },
+  "favicon": ""
+}
+```
+##  服务器状态响应字段说明
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `version` | `object` | 版本信息对象 |
+| `version.name` | `string` | 版本名称，如 `"1.20.4"、”26.1“` |
+| `version.protocol` | `integer` | 协议号，如 `765` |
+| `players` | `object` | 玩家信息对象 |
+| `players.online` | `integer` | 当前在线人数 |
+| `players.max` | `integer` | 最大玩家容量 |
+| `players.sample` | `array` | 在线玩家采样列表 |
+| `players.sample[].name` | `string` | 玩家游戏名 |
+| `players.sample[].id` | `string` (UUID) | 玩家唯一标识符 |
+| `description` | `string` / `object` | 服务器 MOTD 描述（支持 JSON 聊天格式） |
+| `favicon` | `string` (Base64) | 服务器图标（`data:image/png;base64,...`） |
 
 
 ## 高级用法
